@@ -1,0 +1,90 @@
+name: Build APKs
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        app: [crew, master]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # Gradle 8.2 does not support JDK 21, so pin 17
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install Capacitor
+        run: |
+          npm init -y >/dev/null
+          npm i --no-audit --no-fund \
+            @capacitor/core@6 @capacitor/cli@6 @capacitor/android@6 @capacitor/assets@3
+
+      - name: Write Capacitor config for ${{ matrix.app }}
+        run: |
+          node -e '
+            const fs = require("fs");
+            const app = process.argv[1];
+            const a = JSON.parse(fs.readFileSync(`apps/${app}/app.json`, "utf8"));
+            fs.writeFileSync("capacitor.config.json", JSON.stringify({
+              appId: a.appId,
+              appName: a.appName,
+              webDir: `apps/${app}/www`,
+              server: { androidScheme: "https" },
+              android: { allowMixedContent: false }
+            }, null, 2));
+          ' ${{ matrix.app }}
+
+      - name: Add Android platform
+        run: npx cap add android
+
+      - name: Generate launcher icons and splash
+        run: |
+          cp -r apps/${{ matrix.app }}/assets ./assets
+          npx @capacitor/assets generate --android
+
+      - name: Declare camera permission
+        run: |
+          python3 - <<'PY'
+          p = "android/app/src/main/AndroidManifest.xml"
+          s = open(p).read()
+          net = '<uses-permission android:name="android.permission.INTERNET" />'
+          add = (net + "\n"
+                 '    <uses-permission android:name="android.permission.CAMERA" />\n'
+                 '    <uses-feature android:name="android.hardware.camera" '
+                 'android:required="false" />')
+          assert net in s, "INTERNET permission line not found"
+          open(p, "w").write(s.replace(net, add, 1))
+          print("camera permission added")
+          PY
+
+      - name: Build debug APK
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+
+      - name: Rename APK
+        run: |
+          mv android/app/build/outputs/apk/debug/app-debug.apk \
+             rest-hours-${{ matrix.app }}.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rest-hours-${{ matrix.app }}-apk
+          path: rest-hours-${{ matrix.app }}.apk
+          retention-days: 90
